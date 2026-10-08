@@ -112,6 +112,117 @@ class RecordTests(unittest.TestCase):
         points = [health(5.5, 15), health(8.5, 99)]
         self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 1)
 
+    def test_maximum_only_changes_cannot_start_a_close_call(self):
+        for later_hp in (12, 13):
+            with self.subTest(later_hp=later_hp):
+                points = [health(3.5, 12, maximum=100), health(4.5, later_hp, maximum=130), health(8.5, 50, maximum=130)]
+                levels, report = self.build(points, [marker(0), marker(2, True), marker(10)])
+                self.assertEqual(levels, {})
+                self.assertEqual(report['confirmedCloseCalls'], 0)
+
+    def test_actual_damage_crossing_and_sparse_first_low_sample_are_supported(self):
+        markers = [marker(0), marker(2, True), marker(10)]
+        for points in ([health(3.5, 100), health(5.5, 15), health(8.5, 99)], [health(5.5, 15), health(8.5, 99)]):
+            with self.subTest(points=points):
+                self.assertEqual(self.build(points, markers)[1]['confirmedCloseCalls'], 1)
+
+    def test_already_low_before_combat_is_not_a_damage_crossing(self):
+        points = [health(1.5, 15), health(2.5, 15), health(5.5, 14), health(8.5, 99)]
+        self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 0)
+
+    def test_sampled_minimum_requires_an_in_combat_health_decrease(self):
+        for final_hp, expected_hp, expected_max in ((15, 15, 234), (14, 14, 300)):
+            with self.subTest(final_hp=final_hp):
+                points = [health(3.5, 100), health(5.5, 15), health(6.5, final_hp, maximum=300), health(8.5, 110, maximum=300)]
+                close = self.build(points, [marker(0), marker(2, True), marker(10)])[0][9]['closeCalls'][0]
+                self.assertEqual(close['health'], expected_hp)
+                self.assertEqual(close['maxHealth'], expected_max)
+
+    def test_out_of_combat_damage_does_not_replace_the_combat_minimum(self):
+        points = [health(5.5, 15), health(11.5, 1), health(12.5, 1, maximum=500), health(15.5, 180, maximum=500)]
+        close = self.build(points, [marker(0), marker(2, True), marker(10)])[0][9]['closeCalls'][0]
+        self.assertEqual(close['health'], 15)
+        self.assertEqual(close['maxHealth'], 234)
+
+    def test_maximum_reduction_alone_does_not_prove_recovery(self):
+        points = [health(5.5, 15), health(8.5, 15, maximum=30)]
+        self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 0)
+
+    def test_partial_heal_then_maximum_reduction_does_not_prove_recovery(self):
+        markers = [marker(0), marker(2, True), marker(10)]
+        points = [health(3.5, 100, maximum=100), health(5.5, 8, maximum=100), health(7.5, 20, maximum=100), health(8.5, 20, maximum=50)]
+        self.assertEqual(self.build(points, markers)[1]['confirmedCloseCalls'], 0)
+        close = self.build(points + [health(11.5, 21, maximum=50)], markers)[0][9]['closeCalls'][0]
+        self.assertEqual(close['recoveredHealth'], 21)
+        self.assertEqual(close['recoveredAt'], BASE + 11.5)
+
+    def test_returning_low_after_recovery_requires_another_heal_even_above_minimum(self):
+        markers = [marker(0), marker(2, True), marker(10)]
+        points = [health(5.5, 7), health(7.5, 99), health(8.5, 15)]
+        self.assertEqual(self.build(points, markers)[1]['confirmedCloseCalls'], 0)
+        close = self.build(points + [health(11.5, 99)], markers)[0][9]['closeCalls'][0]
+        self.assertEqual(close['health'], 7)
+        self.assertEqual(close['recoveredAt'], BASE + 11.5)
+
+    def test_recovery_retains_first_qualifying_sample_until_combat_exit(self):
+        points = [health(5.5, 15), health(7.5, 90), health(8.5, 100)]
+        close = self.build(points, [marker(0), marker(2, True), marker(10)])[0][9]['closeCalls'][0]
+        self.assertEqual(close['recoveredAt'], BASE + 7.5)
+        self.assertEqual(close['recoveredHealth'], 90)
+
+    def test_transition_second_sample_does_not_erase_a_valid_pending_episode(self):
+        points = [health(5.5, 15), health(10.5, 20), health(11.5, 99)]
+        close = self.build(points, [marker(0), marker(2, True), marker(10)])[0][9]['closeCalls'][0]
+        self.assertEqual(close['health'], 15)
+        self.assertEqual(close['recoveredAt'], BASE + 11.5)
+
+    def test_exit_second_low_health_revokes_earlier_recovery_until_a_later_heal(self):
+        markers = [marker(0), marker(2, True), marker(10)]
+        for low_hp in (7, 20):
+            with self.subTest(low_hp=low_hp):
+                points = [health(5.5, 15), health(8.5, 99), health(10.5, low_hp)]
+                self.assertEqual(self.build(points, markers)[1]['confirmedCloseCalls'], 0)
+                close = self.build(points + [health(11.5, 99)], markers)[0][9]['closeCalls'][0]
+                self.assertEqual(close['health'], 15, 'An ambiguous sample must not replace the proven in-combat minimum')
+                self.assertEqual(close['recoveredAt'], BASE + 11.5)
+
+    def test_exit_second_maximum_only_drop_does_not_revoke_observed_recovery(self):
+        points = [health(5.5, 15), health(8.5, 99), health(10.5, 99, maximum=1000)]
+        self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 1)
+
+    def test_new_combat_cannot_finish_the_previous_fights_unrecovered_episode(self):
+        points = [health(5.5, 15), health(15.5, 99)]
+        markers = [marker(0), marker(2, True), marker(10), marker(12, True), marker(18)]
+        self.assertEqual(self.build(points, markers)[1]['confirmedCloseCalls'], 0)
+
+    def test_multiple_low_recoveries_in_one_combat_produce_one_survived_record(self):
+        points = [health(5.5, 15), health(7.5, 99), health(8.5, 7), health(9.5, 99)]
+        levels, report = self.build(points, [marker(0), marker(2, True), marker(10)])
+        self.assertEqual(report['confirmedCloseCalls'], 1)
+        self.assertEqual(levels[9]['closeCalls'][0]['health'], 7)
+
+    def test_exclusion_in_combat_end_second_cannot_confirm_survival(self):
+        for exclusion in (dict(duel=True), dict(alive=False), dict(closed=True), dict(proof=False), dict(level=10), dict(session='two'), dict(enabled={k: False for k in logs.METRICS})):
+            with self.subTest(exclusion=exclusion):
+                markers = [marker(0), marker(2, True), marker(10), marker(10, **exclusion)]
+                self.assertEqual(self.build([health(5.5, 15), health(8.5, 99)], markers)[1]['confirmedCloseCalls'], 0)
+
+    def test_zero_hp_in_combat_end_second_cannot_confirm_survival(self):
+        points = [health(5.5, 15), health(8.5, 99), health(10.5, 0)]
+        self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 0)
+
+    def test_death_at_the_post_combat_recovery_timestamp_cannot_confirm_survival(self):
+        for death in ((BASE + 11.5, 'death', GUID, {}), health(11.5, 0)):
+            with self.subTest(death=death):
+                points = [health(5.5, 15), health(11.5, 99), death]
+                self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 0)
+
+    def test_death_does_not_allow_fresh_low_samples_from_that_combat(self):
+        for death in ((BASE + 6, 'death', GUID, {}), health(6, 0)):
+            with self.subTest(death=death):
+                points = [health(5.5, 15), death, health(7.5, 15), health(8.5, 99)]
+                self.assertEqual(self.build(points, [marker(0), marker(2, True), marker(10)])[1]['confirmedCloseCalls'], 0)
+
     def test_death_duel_tracking_session_and_level_cancel(self):
         for event in (marker(17, True, alive=False), marker(17, True, duel=True), marker(17, True, session='two'), marker(17, True, level=10), marker(17, True, closed=True), marker(17, True, enabled={k: False for k in logs.METRICS})):
             with self.subTest(event=event):

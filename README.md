@@ -110,6 +110,12 @@ and tracking intervals. Old logs without the new combat/duel markers cannot
 confirm close calls; the helper reports low-health samples as diagnostic
 candidates only.
 
+Maximum-health changes alone cannot create or deepen a close call when a prior
+health sample establishes that HP did not fall. An initial low-health sample can
+still qualify when logs are sparse and combat/session/duel proof is present.
+Out-of-combat damage does not change the encounter minimum. A later low-health
+drop cancels earlier recovery until the player heals again.
+
 Level/state markers have one-second precision. Ambiguous boundary seconds are
 excluded. Logging gaps remain gaps; imported records describe the observed
 encounters and do not claim full coverage. Repeated imports do not add damage

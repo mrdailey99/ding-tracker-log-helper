@@ -1,5 +1,17 @@
 # Log Helper changelog
 
+## 0.15.22
+
+- Maximum-health changes alone no longer create or deepen close calls when
+  preceding health evidence is available.
+- Out-of-combat damage cannot deepen an encounter's recorded minimum.
+- A later low-health drop cancels an earlier recovery until the player heals
+  again. Healing before or after combat exit remains supported.
+- Preserved sparse first-low samples with valid combat/session/duel proof and
+  conservative exclusions for ambiguous transition seconds.
+- Added regression checks for deaths, duels, tracking changes and repeated
+  imports. No change to supported combat-log formats or setup commands.
+
 ## 0.15.21
 
 - Removed the alpha version suffix for the packaged release.

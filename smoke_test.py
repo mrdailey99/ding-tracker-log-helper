@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import struct
 import subprocess
 import tempfile
@@ -89,6 +90,61 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
         assert set(after) == set(before)
         assert [name for name in before if before[name] != after[name]] == ['Interface/AddOns/DingTracker_LogData/Data.lua']
         assert 'Install the DingTracker_LogData' in run('--wow', root, code=1).stderr
+
+        def literal(value):
+            if value is True: return 'true'
+            if value is False: return 'false'
+            if value is None: return 'nil'
+            if isinstance(value, str): return json.dumps(value)
+            if isinstance(value, (int, float)): return str(value)
+            if isinstance(value, list): return '{' + ','.join(literal(v) for v in value) + '}'
+            return '{' + ','.join('[' + literal(k) + ']=' + literal(v) for k, v in value.items()) + '}'
+
+        def close_case(name, samples, expected):
+            # Exercise the frozen parser through its real CLI and disk format.
+            # This fixture does not import the source parser or user files.
+            case = root / name
+            output = case / 'Interface/AddOns/DingTracker_LogData/Data.lua'
+            output.parent.mkdir(parents=True); output.write_text('blank\n')
+            snapshot = case / 'WTF/Account/TEST/SavedVariables/DingTracker.lua'
+            snapshot.parent.mkdir(parents=True)
+            base = 1791385260
+            enabled = {key: True for key in ('nearDeaths', 'abilities', 'mobs', 'toughest')}
+            markers = [dict(at=base + second, session='synthetic', level=9, combat=combat,
+                            alive=True, duel=False, closed=False, proof=True, enabled=enabled)
+                       for second, combat in ((0, False), (2, True), (10, False))]
+            coverage = {key: [dict(startedAt=base - 100, endedAt=base + 20, enabled=True)] for key in enabled}
+            context = dict(schema=1, characters={guid: dict(enabled=True, exportedAt=base + 20,
+                markers=markers, records={9: dict(startedAt=base - 100, endedAt=base + 20, coverage=coverage)})})
+            original = 'DingTrackerLogContext=' + literal(context)
+            snapshot.write_text(original, encoding='utf-8')
+            case_log = case / 'Logs/WoWCombatLog-close.txt'
+            case_log.parent.mkdir()
+            rows = ['10/7/2026 10:01:00.000-5  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.60.1,PROJECT_ID,18\n']
+            for second, hp, maximum in samples:
+                sample_fields = fields.copy()
+                sample_fields[14:16] = [str(hp), str(maximum)]
+                sample_line = io.StringIO(); csv.writer(sample_line, lineterminator='\n').writerow(sample_fields)
+                rows.append(f'10/7/2026 10:01:{second:06.3f}-5  ' + sample_line.getvalue())
+            case_log.write_text(''.join(rows), encoding='utf-8')
+            result, _ = json.JSONDecoder().raw_decode(run('--wow', case).stdout)
+            assert result['characters'][guid]['confirmedCloseCalls'] == expected, (name, result)
+            first_payload = output.read_bytes()
+            repeated, _ = json.JSONDecoder().raw_decode(run('--wow', case).stdout)
+            assert repeated['characters'][guid]['confirmedCloseCalls'] == expected, (name, repeated)
+            # A new export timestamp is expected; episode identities and evidence must remain stable.
+            def stable_payload(payload):
+                return re.sub(rb'\["generatedAt"\]\s*=\s*\d+', b'["generatedAt"]=0', payload)
+            assert stable_payload(output.read_bytes()) == stable_payload(first_payload), 'Repeated import changed episode evidence'
+            assert snapshot.read_text(encoding='utf-8') == original, 'Close-call scan changed SavedVariables'
+
+        close_case('Maximum-only crossing', [(3.5, 12, 100), (4.5, 12, 130), (8.5, 50, 130)], 0)
+        close_case('Heal before exit', [(3.5, 15, 234), (8.5, 99, 234)], 1)
+        close_case('Heal after exit', [(3.5, 15, 234), (12.5, 99, 234)], 1)
+        close_case('Maximum-only recovery', [(3.5, 8, 100), (6.5, 20, 100), (8.5, 20, 50)], 0)
+        close_case('Low health in exit second', [(3.5, 8, 100), (8.5, 40, 100), (10.5, 5, 100)], 0)
+        close_case('Zero HP at recovery time', [(3.5, 15, 234), (11.5, 99, 234), (11.5, 0, 234)], 0)
+
         import windows_tray
         user, _, _ = windows_tray.api()
         try:
@@ -132,7 +188,7 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
                 except PermissionError:
                     time.sleep(0.1)
             assert not exe.exists(), 'Background executable remained in use after Exit'
-        print('PASS: Windows x64 bundle, SHA-256, CLI validation, dry run, 51-damage import, SavedVariables preservation, tray startup, duplicate prevention, live intervals, Scan now and Exit; no Python on executable PATH.')
+        print('PASS: Windows x64 bundle, SHA-256, CLI validation, dry run, 51-damage import, six close-call scenarios, repeat imports, SavedVariables preservation, tray startup, duplicate prevention, live intervals, Scan now and Exit; no Python on executable PATH.')
 
 
 if __name__ == '__main__':

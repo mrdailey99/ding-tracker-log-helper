@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import csv
 import datetime as dt
 import hashlib
@@ -254,19 +255,37 @@ def build_payload(context, points, now=None):
         markers.sort(key=lambda m: m['at'])
         combined = [(m['at'], 'marker', guid, m) for m in markers] + points
         combined.sort(key=lambda p: (p[0], 0 if p[1] == 'marker' else 1))
-        state, pending, combat_start, combat_end = None, None, None, None
-        for at, kind, entity, value in combined:
+        state, pending, combat_start, combat_end, previous_health = None, None, None, None, None
+        cancellations = []
+        for observation_index, (at, kind, entity, value) in enumerate(combined):
             if kind == 'marker':
                 old = state
                 state = value
                 session_change = not old or old.get('session') != state.get('session')
                 changed_level = old and old.get('level') != state.get('level')
-                if session_change or changed_level or state.get('duel') or not state.get('alive') or not state.get('enabled', {}).get('nearDeaths') or state.get('closed'):
-                    pending, combat_start, combat_end = None, None, None
+                if session_change or changed_level or state.get('proof') is not True or state.get('duel') or not state.get('alive') or not state.get('enabled', {}).get('nearDeaths') or state.get('closed'):
+                    pending, combat_start, combat_end, previous_health = None, None, None, None
+                    cancellations.append(at)
                 elif old and old.get('combat') is False and state.get('combat') is True:
                     pending, combat_start, combat_end = None, at, None
                 elif old and old.get('combat') is True and state.get('combat') is False:
                     combat_end = at
+                    if pending and pending.get('recoveredAt'):
+                        # The exit marker may sort before damage from its own
+                        # second. Such a fall could have happened before exit,
+                        # so require a later unambiguous recovery instead.
+                        last_hp = previous_health['health'] if previous_health else pending['recoveredHealth']
+                        next_index = observation_index + 1
+                        while next_index < len(combined) and combined[next_index][0] < at + 1:
+                            _, next_kind, next_entity, next_value = combined[next_index]
+                            if next_kind == 'health' and next_entity == guid:
+                                next_hp, next_maximum = next_value['health'], next_value['maxHealth']
+                                if next_hp < last_hp and 0 < next_hp / next_maximum <= .1:
+                                    for key in ('recoveredAt', 'recoveredHealth', 'recoveredMaxHealth'):
+                                        pending.pop(key, None)
+                                    break
+                                last_hp = next_hp
+                            next_index += 1
                     if pending and pending.get('recoveredAt'):
                         finish_close(guid, pending, combat_start, combat_end, bucket)
                         confirmed += 1; pending = None
@@ -297,36 +316,55 @@ def build_payload(context, points, now=None):
                         elif previous and hp['maxHealth'] > previous['maxHealth']:
                             entries[entries.index(previous)] = hp
             elif kind == 'death':
-                pending = None
+                pending, previous_health, combat_start, combat_end = None, None, None, None
+                cancellations.append(at)
             elif kind == 'health':
                 hp, maximum = value['health'], value['maxHealth']
                 if 0 < hp / maximum <= .1:
                     low_count += 1
-                # State transitions have one-second precision. Discard their entire second.
-                valid = state and state.get('proof') is True and not state.get('closed') and not state.get('duel') and state.get('alive') and at < character.get('exportedAt', 0) and int(at) != state['at']
+                if hp == 0:
+                    pending, previous_health, combat_start, combat_end = None, None, None, None
+                    cancellations.append(at)
+                    continue
+                valid = state and state.get('proof') is True and not state.get('closed') and not state.get('duel') and state.get('alive') and at < character.get('exportedAt', 0)
                 level = record_at(character, at, 'nearDeaths')
                 if not valid or not level or state.get('level') != level or not state.get('enabled', {}).get('nearDeaths'):
-                    pending = None
+                    pending, previous_health = None, None
                     continue
-                if hp == 0:
-                    pending = None
-                elif state.get('combat') and combat_start and not pending and hp / maximum <= .1:
+                # Markers have one-second precision, so these samples cannot
+                # prove which side of a transition they belong to. Ignore them
+                # as crossings/minima/recoveries, but retain their actual HP as
+                # the baseline for a later unambiguous health change.
+                if int(at) == state['at']:
+                    previous_health = value
+                    continue
+                # A first low sample can be the only advanced-log snapshot of a
+                # genuine fall. With an earlier valid sample, require both an
+                # actual HP decrease and a crossing; max-HP changes are not damage.
+                falling = previous_health is None or hp < previous_health['health']
+                crossing = previous_health is None or previous_health['health'] / previous_health['maxHealth'] > .1
+                if state.get('combat') and combat_start is not None and not pending and hp / maximum <= .1 and falling and crossing:
                     pending = dict(value, timestamp=at, level=level)
                 elif pending:
-                    if hp / maximum < pending['health'] / pending['maxHealth']:
-                        pending.update(value, timestamp=at)
+                    if state.get('combat') and falling and hp / maximum <= .1:
+                        if hp / maximum < pending['health'] / pending['maxHealth']:
+                            pending.update(value, timestamp=at)
                         for key in ('recoveredAt', 'recoveredHealth', 'recoveredMaxHealth'):
                             pending.pop(key, None)
-                    if hp > pending['health'] and hp / maximum >= .35:
+                    if not pending.get('recoveredAt') and previous_health is not None and hp > previous_health['health'] and hp > pending['health'] and hp / maximum >= .35:
                         pending.update(recoveredAt=at, recoveredHealth=hp, recoveredMaxHealth=maximum)
                         if combat_end is not None:
                             finish_close(guid, pending, combat_start, combat_end, bucket)
                             confirmed += 1; pending = None
-        deaths = [p[0] for p in points if p[1] == 'death' and p[2] == guid]
-        # Combat-ending markers have integer timestamps. A death in that same
-        # second may have ended combat; it cannot establish a survived episode.
+                previous_health = value
+        # Combat-ending markers have integer timestamps. A death or exclusion
+        # in that same second may have ended combat, rather than proving survival.
+        def uninterrupted_close(close):
+            index = bisect_left(cancellations, close['timestamp'])
+            return index == len(cancellations) or (cancellations[index] >= close['combatEndedAt'] + 1 and cancellations[index] > close['recoveredAt'])
+
         for items in levels.values():
-            items['closeCalls'] = [c for c in items['closeCalls'] if not any(c['timestamp'] <= death < c['combatEndedAt'] + 1 for death in deaths)]
+            items['closeCalls'] = [c for c in items['closeCalls'] if uninterrupted_close(c)]
         confirmed = sum(len(v['closeCalls']) for v in levels.values())
         result['characters'][guid] = {'exportedAt': character.get('exportedAt'), 'levels': levels}
         report[guid] = {'levels': len(levels), 'highestHit': max((v['hits'][0]['amount'] for v in levels.values() if v['hits']), default=0), 'mobHealthRecords': sum(len(v['health']) for v in levels.values()), 'lowHealthSamples': low_count, 'confirmedCloseCalls': confirmed}
