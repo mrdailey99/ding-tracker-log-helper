@@ -1,0 +1,62 @@
+name: Publish Windows helper
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build without publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: helper-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          architecture: x64
+      - name: Prepare version and release notes
+        id: metadata
+        shell: pwsh
+        run: |
+          $dingVersion = (Get-Content -LiteralPath VERSION -Raw).Trim()
+          if ($dingVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Use a release version such as 0.15.21.' }
+          $dingChangelog = (Get-Content -LiteralPath CHANGELOG.md -Raw).Replace("`r`n", "`n")
+          $dingPattern = '(?ms)^## ' + [regex]::Escape($dingVersion) + '\n(.*?)(?=^## |\z)'
+          $dingNotes = [regex]::Matches($dingChangelog, $dingPattern)
+          if ($dingNotes.Count -ne 1 -or -not $dingNotes[0].Groups[1].Value.Trim()) { throw 'Add matching release notes to CHANGELOG.md.' }
+          New-Item -ItemType Directory -Path .build -Force | Out-Null
+          $dingText = "## Download and setup`n`nDownload the Windows x64 ZIP under Assets and extract it. Python is not required.`n`nInstall Ding Tracker 0.15.21 or newer from CurseForge. In WoW chat, enter /ding logs on and then /reload. Run DingTracker-LogHelper.exe, select the Forever client folder containing Interface, Logs and WTF, and press Enter for 60-second checks and background tray mode.`n`nAfter playing, /reload saves your progress; Scan now imports it; a second /reload loads the results. See the [README](https://github.com/mrdailey99/ding-tracker-log-helper#readme) for full instructions.`n`n## Changes`n`n" + $dingNotes[0].Groups[1].Value.Trim()
+          $dingText | Set-Content -LiteralPath .build/release-notes.md -Encoding UTF8
+          "version=$dingVersion" >> $env:GITHUB_OUTPUT
+      - run: python -m unittest discover -s tests -p test_log_import.py
+      - run: ./build.ps1
+        shell: pwsh
+      - name: Smoke test portable executable
+        shell: pwsh
+        run: python smoke_test.py "dist/DingTracker-LogHelper-${{ steps.metadata.outputs.version }}-windows-x64.zip"
+      - name: Save tested download
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Windows-helper-${{ steps.metadata.outputs.version }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $dingVersion = '${{ steps.metadata.outputs.version }}'
+          gh release create "v$dingVersion" "dist/DingTracker-LogHelper-$dingVersion-windows-x64.zip" "dist/DingTracker-LogHelper-$dingVersion-windows-x64.zip.sha256" --target '${{ github.sha }}' --title "Ding Tracker Log Helper $dingVersion" --notes-file .build/release-notes.md
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed. Check Releases before rerunning; an existing version is never overwritten automatically.' }
