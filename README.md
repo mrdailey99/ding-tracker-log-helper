@@ -26,7 +26,7 @@ it does not include the addon or install it for you.
    `/ding logs on` enables this character's imports and starts combat logging.
    You can also enable **Import combat logs with the desktop helper** in
    **Settings → Tracking**.
-   Keep Ability damage, Creatures killed, Toughest mobs and Close calls survived
+   Keep Ability damage, Mobs killed, Toughest mobs and Close calls survived
    tracking enabled for the corresponding imports.
 3. Extract the **Windows x64 helper ZIP** somewhere outside
    `Interface/AddOns`. Double-click **DingTracker-LogHelper.exe**.
@@ -113,10 +113,10 @@ there is no installer, Windows service or Python prerequisite for users.
 | Record | Rules |
 | --- | --- |
 | Highest hit | Largest individual damage event from your exact player GUID, including overkill. Absorbed damage is not added. Pet hits and aggregate damage totals are excluded. |
-| Creature HP | An observed maximum HP sample for the exact creature GUID, followed within 120 seconds by your logged `PARTY_KILL`. The same NPC must already have a credited journal kill in that level. No kills are added. |
+| Mob HP | An observed maximum HP sample for the exact mob GUID, followed within 120 seconds by your logged `PARTY_KILL`. The same NPC must already have a credited journal kill in that level. No kills are added. |
 | Close call | Reach **10% HP or less in combat**, survive the end of combat and recover to **35% HP or more**, in the same level/session with tracking enabled. Deaths, duels and missing combat/duel proof cancel the episode. Recovery may occur during combat or afterwards. |
 
-Highest hits and creature HP can backfill logged encounters within saved level
+Highest hits and mob HP can backfill logged encounters within saved level
 and tracking intervals. Old logs without the new combat/duel markers cannot
 confirm close calls; the helper reports low-health samples as diagnostic
 candidates only.
@@ -130,7 +130,7 @@ drop cancels earlier recovery until the player heals again.
 Level/state markers have one-second precision. Ambiguous boundary seconds are
 excluded. Logging gaps remain gaps; imported records describe the observed
 encounters and do not claim full coverage. Repeated imports do not add damage
-totals, creature kills or duplicate close calls.
+totals, mob kills or duplicate close calls.
 
 ## Files and updates
 

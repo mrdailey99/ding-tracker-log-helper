@@ -540,7 +540,7 @@ def show_report(report, interactive=False):
     else:
         print('\nScan complete.', flush=True)
         for guid, result in report['characters'].items():
-            print(f"  {guid}: highest hit {result['highestHit']}, {result['mobHealthRecords']} creature HP records, {result['confirmedCloseCalls']} close calls.", flush=True)
+            print(f"  {guid}: highest hit {result['highestHit']}, {result['mobHealthRecords']} mob HP records, {result['confirmedCloseCalls']} close calls.", flush=True)
         for warning in report['warnings']:
             print(f'  Warning: {warning}', flush=True)
     if not report['dryRun']:

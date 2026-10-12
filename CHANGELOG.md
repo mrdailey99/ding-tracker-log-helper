@@ -1,5 +1,10 @@
 # Log Helper changelog
 
+## 0.15.25
+
+- Use Mobs consistently in the HP summary and setup guide, matching the addon.
+  Import rules, log formats and the default 10-second tray checks are unchanged.
+
 ## 0.15.24
 
 - Check changed files every 10 seconds by default and automatically start in
