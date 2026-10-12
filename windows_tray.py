@@ -8,6 +8,8 @@ import threading
 READY_PROPERTY = 'DingTrackerLogHelperReady'
 INTERVAL_PROPERTY = 'DingTrackerLogHelperInterval'
 WM_CLOSE = 0x10
+# Existing command IDs stay stable for the native smoke checks and tray worker.
+INTERVAL_COMMANDS = {204: 10, 200: 30, 201: 60, 202: 120, 203: 300}
 
 
 def window_title(client):
@@ -111,8 +113,8 @@ class Tray:
         elif command == 103:
             self.control.stop()
             self.user.DestroyWindow(self.window)
-        elif 200 <= command <= 203:
-            self.control.set_interval((30, 60, 120, 300)[command - 200])
+        elif command in INTERVAL_COMMANDS:
+            self.control.set_interval(INTERVAL_COMMANDS[command])
             self.user.SetPropW(self.window, INTERVAL_PROPERTY, self.control.interval)
             self.update(f'Checks every {self.control.interval} seconds')
 
@@ -126,7 +128,7 @@ class Tray:
             for command, label in ((100, 'Show console'), (101, 'Hide console'), (102, 'Scan now')):
                 self.user.AppendMenuW(menu, 0, command, label)
             self.user.AppendMenuW(menu, 0x800, 0, None)
-            for command, interval in enumerate((30, 60, 120, 300), 200):
+            for command, interval in INTERVAL_COMMANDS.items():
                 self.user.AppendMenuW(menu, 8 if interval == self.control.interval else 0,
                                       command, f'Check every {interval} seconds')
             self.user.AppendMenuW(menu, 0x800, 0, None)

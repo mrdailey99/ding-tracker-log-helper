@@ -2,6 +2,7 @@ import copy
 import csv
 import io
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -329,36 +330,88 @@ class LaunchTests(unittest.TestCase):
             logs.main([])
         self.assertEqual(result.exception.code, 2)
 
-    def test_double_click_watches_and_cancel_exits_without_writes(self):
+    def test_enter_selects_only_detected_folder_without_additional_questions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            client = Path(folder)
+            target = client / 'Interface/AddOns/DingTracker_LogData/Data.lua'
+            target.parent.mkdir(parents=True); target.write_text('blank')
+            with patch.object(logs, 'discover_clients', return_value=[client]), patch('builtins.input', return_value='') as prompt, patch('sys.stdout', new=io.StringIO()):
+                self.assertEqual(logs.choose_client(), client.resolve())
+            prompt.assert_called_once()
+            self.assertIn('Enter to use folder 1', prompt.call_args.args[0])
+            with patch.object(logs, 'discover_clients', return_value=[client]), patch('builtins.input', return_value='q'), patch('sys.stdout', new=io.StringIO()):
+                self.assertIsNone(logs.choose_client())
+            with patch.object(logs, 'discover_clients', return_value=[client]), patch('builtins.input', side_effect=EOFError), patch('sys.stdout', new=io.StringIO()):
+                self.assertIsNone(logs.choose_client())
+
+    def test_enter_does_not_choose_between_multiple_clients(self):
+        with tempfile.TemporaryDirectory() as folder:
+            clients = [Path(folder) / name for name in ('Forever', 'Other client')]
+            for client in clients:
+                target = client / 'Interface/AddOns/DingTracker_LogData/Data.lua'
+                target.parent.mkdir(parents=True); target.write_text('blank')
+            with patch.object(logs, 'discover_clients', return_value=clients), patch('builtins.input', side_effect=['', '2']), patch('sys.stdout', new=io.StringIO()) as output:
+                self.assertEqual(logs.choose_client(), clients[1].resolve())
+            self.assertIn('Several clients were found', output.getvalue())
+
+    def test_double_click_defaults_to_ten_second_tray_and_cancel_exits_without_writes(self):
         with patch('sys.stdin.isatty', return_value=True), patch.object(logs, 'choose_client', return_value=None), patch.object(logs, 'run_once') as run:
             self.assertEqual(logs.main([]), 0)
             run.assert_not_called()
-        report = {'dryRun': False, 'characters': {}, 'warnings': []}
-        with patch('sys.stdin.isatty', return_value=True), patch.object(logs, 'choose_client', return_value=Path('/missing')), patch.object(logs, 'choose_watch_options', return_value=(120, 'console')), patch.object(logs, 'run_once', return_value=report) as run, patch('sys.stdout', new=io.StringIO()), patch('sys.stderr', new=io.StringIO()), patch.object(logs.WatchControl, 'wait', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
-            logs.main([])
-        run.assert_called_once_with(Path('/missing'), False)
+        client = Path('/synthetic-client')
+        with patch.object(logs, 'os', SimpleNamespace(name='nt')), patch('sys.stdin.isatty', return_value=True), patch.object(logs, 'choose_client', return_value=client), patch.object(logs, 'launch_background', return_value=0) as launch, patch.object(logs, 'watch_files') as watch, patch('builtins.input', side_effect=AssertionError('Unexpected mode or interval prompt')):
+            self.assertEqual(logs.main([]), 0)
+        self.assertEqual(launch.call_args.args[0].wow, client)
+        self.assertEqual(launch.call_args.args[0].interval, 10)
+        watch.assert_not_called()
 
-    def test_setup_and_interval_choices(self):
+    def test_setup_and_interval_validation(self):
         self.assertIn("press Enter to open chat", logs.GAME_SETUP)
         self.assertIn("'/ding logs on'", logs.GAME_SETUP)
         self.assertIn("'/reload'", logs.GAME_SETUP)
-        with patch('builtins.input', side_effect=['4', '300', 'no', 'b']), patch('sys.stdout', new=io.StringIO()):
-            self.assertEqual(logs.choose_watch_options(), (300, 'background'))
-        with patch('builtins.input', side_effect=['', 'o']), patch('sys.stdout', new=io.StringIO()):
-            self.assertEqual(logs.choose_watch_options(), (60, 'once'))
         for value in ('0', '4', '3601', '1.5', 'abc'):
             with self.subTest(value=value), self.assertRaises(logs.argparse.ArgumentTypeError):
                 logs.interval_seconds(value)
 
     def test_cli_uses_selected_interval_and_rejects_invalid_value(self):
-        for value in (60, 300):
-            args = ['--wow', '/missing', '--watch'] + (['--interval', str(value)] if value != 60 else [])
+        for value in (10, 300):
+            args = ['--wow', '/missing', '--watch'] + (['--interval', str(value)] if value != 10 else [])
             with patch.object(logs, 'watch_files', return_value=0) as watch, patch('sys.stdout', new=io.StringIO()):
                 self.assertEqual(logs.main(args), 0)
             self.assertEqual(watch.call_args.args[4].interval, value)
         with patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as result:
             logs.main(['--wow', '/missing', '--watch', '--interval', '0'])
         self.assertEqual(result.exception.code, 2)
+
+    def test_cli_default_background_and_explicit_headless_modes(self):
+        with patch.object(logs, 'os', SimpleNamespace(name='nt')), patch.object(logs, 'launch_background', return_value=0) as launch, patch('builtins.input', side_effect=AssertionError('CLI must not prompt')):
+            self.assertEqual(logs.main(['--wow', '/synthetic-client']), 0)
+        self.assertEqual(launch.call_args.args[0].interval, 10)
+        for flags, expected_watch in ((['--once'], False), (['--dry-run'], False), (['--watch'], True), (['--foreground'], True), (['--dry-run', '--watch'], True)):
+            with self.subTest(flags=flags), patch.object(logs, 'os', SimpleNamespace(name='nt')), patch.object(logs, 'launch_background') as launch, patch.object(logs, 'watch_files', return_value=0) as watch, patch('builtins.input', side_effect=AssertionError('CLI must not prompt')), patch('sys.stdout', new=io.StringIO()):
+                self.assertEqual(logs.main(['--wow', '/synthetic-client', *flags]), 0)
+            launch.assert_not_called()
+            self.assertEqual(watch.call_args.args[2], expected_watch)
+
+    def test_non_windows_default_stays_one_shot_and_explicit_tray_is_rejected(self):
+        with patch.object(logs, 'os', SimpleNamespace(name='posix')), patch.object(logs, 'watch_files', return_value=0) as watch:
+            self.assertEqual(logs.main(['--wow', '/synthetic-client']), 0)
+        self.assertFalse(watch.call_args.args[2])
+        with patch.object(logs, 'os', SimpleNamespace(name='posix')), patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as result:
+            logs.main(['--wow', '/synthetic-client', '--background'])
+        self.assertEqual(result.exception.code, 2)
+
+    def test_background_rejects_missing_addon_before_starting_worker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(OSError, 'Install the DingTracker_LogData'):
+                logs.launch_background(SimpleNamespace(wow=Path(folder), interval=10))
+
+    def test_conflicting_modes_are_rejected_before_launch(self):
+        with patch.object(logs, 'launch_background') as launch, patch.object(logs, 'watch_files') as watch, patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as result:
+            logs.main(['--wow', '/synthetic-client', '--once', '--background'])
+        self.assertEqual(result.exception.code, 2)
+        launch.assert_not_called()
+        watch.assert_not_called()
 
     def test_control_wakes_for_manual_scan_interval_change_and_exit(self):
         control = logs.WatchControl(60)

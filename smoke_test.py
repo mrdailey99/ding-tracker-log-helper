@@ -47,7 +47,8 @@ def check(archive):
         version = json.loads((bundle / 'BUILD-INFO.json').read_text())['helperVersion']
         assert version in run('--version').stdout
         help_text = run('--help').stdout
-        assert all(option in help_text for option in ('--dry-run', '--interval', '--background', '--stop', '--status'))
+        assert all(option in help_text for option in ('--dry-run', '--interval', '--background', '--foreground', '--once', '--stop', '--status'))
+        assert 'default 10' in help_text
         assert '5 to 3600' in run('--wow', root, '--watch', '--interval', '0', code=2).stderr
         assert '--wow is required' in run('--watch', code=2).stderr
         # Windows considers the NUL device a TTY. EOF must exit quietly, too.
@@ -82,13 +83,14 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
         report = json.loads(run('--wow', client, '--dry-run').stdout)
         assert report['dryRun'] and report['characters'][guid]['highestHit'] == 51, report
         assert before == {p.relative_to(client).as_posix(): p.read_bytes() for p in client.rglob('*') if p.is_file()}
-        result = run('--wow', client)
+        result = run('--wow', client, '--once')
         report, _ = json.JSONDecoder().raw_decode(result.stdout)
         assert report['characters'][guid]['highestHit'] == 51
         assert 'DingTrackerLogPayload' in target.read_text() and '["amount"]=51' in target.read_text().replace(' ', '')
         after = {p.relative_to(client).as_posix(): p.read_bytes() for p in client.rglob('*') if p.is_file()}
         assert set(after) == set(before)
         assert [name for name in before if before[name] != after[name]] == ['Interface/AddOns/DingTracker_LogData/Data.lua']
+        assert 'Install the DingTracker_LogData' in run('--wow', root, '--once', code=1).stderr
         assert 'Install the DingTracker_LogData' in run('--wow', root, code=1).stderr
 
         def literal(value):
@@ -127,10 +129,10 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
                 sample_line = io.StringIO(); csv.writer(sample_line, lineterminator='\n').writerow(sample_fields)
                 rows.append(f'10/7/2026 10:01:{second:06.3f}-5  ' + sample_line.getvalue())
             case_log.write_text(''.join(rows), encoding='utf-8')
-            result, _ = json.JSONDecoder().raw_decode(run('--wow', case).stdout)
+            result, _ = json.JSONDecoder().raw_decode(run('--wow', case, '--once').stdout)
             assert result['characters'][guid]['confirmedCloseCalls'] == expected, (name, result)
             first_payload = output.read_bytes()
-            repeated, _ = json.JSONDecoder().raw_decode(run('--wow', case).stdout)
+            repeated, _ = json.JSONDecoder().raw_decode(run('--wow', case, '--once').stdout)
             assert repeated['characters'][guid]['confirmedCloseCalls'] == expected, (name, repeated)
             # A new export timestamp is expected; episode identities and evidence must remain stable.
             def stable_payload(payload):
@@ -147,11 +149,32 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
 
         import windows_tray
         user, _, _ = windows_tray.api()
+        # Exercise an explicit foreground launch without showing a console during CI.
+        foreground_output = root / 'foreground-output.txt'
+        with foreground_output.open('w', encoding='utf-8') as output:
+            foreground = subprocess.Popen([str(exe), '--wow', str(client), '--foreground'],
+                env=environment, cwd=root, stdin=subprocess.DEVNULL, stdout=output,
+                stderr=output, creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                for _ in range(100):
+                    if 'Watching ' in foreground_output.read_text(encoding='utf-8'): break
+                    assert foreground.poll() is None, 'Foreground helper exited unexpectedly'
+                    time.sleep(0.1)
+                assert 'Checks every 10 seconds' in foreground_output.read_text(encoding='utf-8')
+                assert not windows_tray.find_worker(client, ready=False), 'Foreground mode created a tray worker'
+            finally:
+                # PyInstaller's one-file bootloader has a child process. Stop the
+                # complete tree belonging to this temporary foreground fixture.
+                stopped = subprocess.run([str(system / 'System32/taskkill.exe'), '/PID', str(foreground.pid), '/T', '/F'],
+                    capture_output=True, text=True, timeout=10)
+                assert stopped.returncode == 0, (stopped.stdout, stopped.stderr)
+                foreground.wait(timeout=10)
         try:
             assert 'not running' in run('--wow', client, '--status').stdout
-            assert 'Running in the Windows tray' in run('--wow', client, '--background', '--interval', '300').stdout
-            assert 'every 300 seconds' in run('--wow', client, '--status').stdout
-            assert 'already running' in run('--wow', client, '--background').stdout
+            # Passing only --wow uses the same 10-second tray defaults as setup.
+            assert 'Running in the Windows tray' in run('--wow', client).stdout
+            assert 'every 10 seconds' in run('--wow', client, '--status').stdout
+            assert 'already running' in run('--wow', client).stdout
             window = windows_tray.find_worker(client)
             assert window
             # Use native window commands for this temporary helper only.
@@ -160,6 +183,16 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
                 if windows_tray.worker_interval(client) == 30: break
                 time.sleep(0.1)
             assert windows_tray.worker_interval(client) == 30
+            assert user.PostMessageW(window, 0x111, 203, 0)
+            for _ in range(50):
+                if windows_tray.worker_interval(client) == 300: break
+                time.sleep(0.1)
+            assert windows_tray.worker_interval(client) == 300
+            assert user.PostMessageW(window, 0x111, 204, 0)
+            for _ in range(50):
+                if windows_tray.worker_interval(client) == 10: break
+                time.sleep(0.1)
+            assert windows_tray.worker_interval(client) == 10
             assert user.PostMessageW(window, 0x111, 203, 0)
             for _ in range(50):
                 if windows_tray.worker_interval(client) == 300: break
@@ -188,7 +221,7 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
                 except PermissionError:
                     time.sleep(0.1)
             assert not exe.exists(), 'Background executable remained in use after Exit'
-        print('PASS: Windows x64 bundle, SHA-256, CLI validation, dry run, 51-damage import, six close-call scenarios, repeat imports, SavedVariables preservation, tray startup, duplicate prevention, live intervals, Scan now and Exit; no Python on executable PATH.')
+        print('PASS: Windows x64 bundle, SHA-256, CLI defaults/one-shot validation, dry run, 51-damage import, six close-call scenarios, repeat imports, SavedVariables preservation, default 10-second tray startup, duplicate prevention, live intervals, Scan now and Exit; no Python on executable PATH.')
 
 
 if __name__ == '__main__':

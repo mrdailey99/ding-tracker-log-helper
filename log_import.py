@@ -20,7 +20,7 @@ SCHEMA = 1
 VERSION = (Path(__file__).with_name('VERSION')).read_text(encoding='utf-8').strip()
 METRICS = ("abilities", "mobs", "toughest", "nearDeaths")
 MAX_POINTS = 1_000_000
-DEFAULT_INTERVAL = 60
+DEFAULT_INTERVAL = 10
 GAME_SETUP = "In WoW, press Enter to open chat. Type '/ding logs on' and press Enter.\nThen type '/reload' in chat and press Enter to save your character first."
 SPACE = re.compile(r"(?:\s+|--[^\r\n]*)+")
 NAMED = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)\s*=")
@@ -472,7 +472,7 @@ def run_once(wow, dry_run=False):
 
 
 def discover_clients(environment=None, nearby=None):
-    """Look only in common install locations; never choose a client for the user."""
+    """Look only in common install locations; folder selection stays explicit."""
     environment = os.environ if environment is None else environment
     bases = {Path(environment[key]) / 'World of Warcraft'
              for key in ('ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432')
@@ -503,13 +503,23 @@ def choose_client():
     for number, client in enumerate(clients, 1):
         print(f'  {number}. {client}')
     while True:
-        prompt = '\nEnter a number or paste the client folder (Enter to exit): ' if clients else '\nPaste the client folder (Enter to exit): '
+        if len(clients) == 1:
+            prompt = '\nPress Enter to use folder 1, or paste another client folder (Q to exit): '
+        elif clients:
+            prompt = '\nEnter a number or paste the client folder (Q to exit): '
+        else:
+            prompt = '\nPaste the client folder (Enter to exit): '
         try:
             answer = input(prompt).strip().strip('"').strip("'")
         except EOFError:
             return None
-        if not answer:
+        if answer.casefold() == 'q' or (not answer and not clients):
             return None
+        if not answer:
+            if len(clients) != 1:
+                print('Several clients were found. Choose the folder you play on.')
+                continue
+            answer = '1'
         if answer.isdecimal() and clients:
             number = int(answer)
             if not 1 <= number <= len(clients):
@@ -545,30 +555,6 @@ def interval_seconds(value):
     if not 5 <= interval <= 3600:
         raise argparse.ArgumentTypeError('Choose an interval from 5 to 3600 seconds')
     return interval
-
-
-def choose_watch_options():
-    while True:
-        try:
-            answer = input(f'\nCheck interval in seconds (Enter for {DEFAULT_INTERVAL}): ').strip()
-            interval = interval_seconds(answer or DEFAULT_INTERVAL)
-            break
-        except argparse.ArgumentTypeError as error:
-            print(error)
-        except EOFError:
-            return DEFAULT_INTERVAL, 'once'
-    while True:
-        try:
-            answer = input('Run in [B]ackground (tray icon), [C]onsole, or [O]nce (Enter for B): ').strip().casefold()
-        except EOFError:
-            return interval, 'once'
-        if answer in ('', 'b', 'background'):
-            return interval, 'background'
-        if answer in ('c', 'console'):
-            return interval, 'console'
-        if answer in ('o', 'once'):
-            return interval, 'once'
-        print('Enter B, C or O.')
 
 
 class WatchControl:
@@ -638,6 +624,8 @@ def watch_files(wow, dry_run=False, watch=False, interactive=False, control=None
 
 def launch_background(args):
     import subprocess
+    if not (args.wow / 'Interface/AddOns/DingTracker_LogData/Data.lua').is_file():
+        raise OSError('Install the DingTracker_LogData addon first and select its client folder.')
     from windows_tray import find_worker
     if find_worker(args.wow):
         print('The helper is already running for this client. Right-click its tray icon for controls.', flush=True)
@@ -645,7 +633,7 @@ def launch_background(args):
     command = [sys.executable]
     if not getattr(sys, 'frozen', False):
         command.append(str(Path(__file__).resolve()))
-    command += ['--wow', str(args.wow.resolve()), '--watch', '--interval', str(args.interval), '--tray-worker']
+    command += ['--wow', str(args.wow.resolve()), '--interval', str(args.interval), '--tray-worker']
     if args.dry_run:
         command.append('--dry-run')
     startup = subprocess.STARTUPINFO()
@@ -672,13 +660,14 @@ def main(argv=None):
     parser.add_argument('--version', action='version', version=f'Ding Tracker Log Helper {VERSION}')
     parser.add_argument('--wow', type=Path, help='Client folder containing Interface, Logs and WTF')
     parser.add_argument('--dry-run', action='store_true', help='Report results without changing any files')
-    parser.add_argument('--watch', action='store_true', help='Keep checking for saved context/log changes')
-    parser.add_argument('--interval', type=interval_seconds, default=DEFAULT_INTERVAL, help='Seconds between checks (5-3600; default 60)')
+    parser.add_argument('--interval', type=interval_seconds, default=DEFAULT_INTERVAL, help=f'Seconds between checks (5-3600; default {DEFAULT_INTERVAL})')
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument('--background', action='store_true', help='Watch in the Windows tray without a floating console')
+    mode.add_argument('--watch', '--foreground', action='store_true', help='Keep checking in the foreground console')
+    mode.add_argument('--once', action='store_true', help='Scan once and exit instead of starting background checks')
+    mode.add_argument('--background', action='store_true', help='Watch in the Windows tray (default on Windows)')
     mode.add_argument('--stop', action='store_true', help='Stop the background helper for this --wow folder')
     mode.add_argument('--status', action='store_true', help='Check whether a background helper is running for this --wow folder')
-    parser.add_argument('--tray-worker', action='store_true', help=argparse.SUPPRESS)
+    mode.add_argument('--tray-worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     interactive = not argv and sys.stdin.isatty()
     if not args.wow:
@@ -687,9 +676,10 @@ def main(argv=None):
         args.wow = choose_client()
         if args.wow is None:
             return 0
-        args.interval, selected_mode = choose_watch_options()
-        args.background = selected_mode == 'background'
-        args.watch = selected_mode == 'console'
+    # A dry run stays a single scan unless its mode is explicitly selected.
+    # Non-Windows source launches retain one-shot behavior; the tray is Windows-only.
+    if not (args.watch or args.once or args.background or args.tray_worker or args.stop or args.status or args.dry_run):
+        args.background = os.name == 'nt'
     if (args.background or args.tray_worker or args.stop or args.status) and os.name != 'nt':
         parser.error('Background/tray controls are available on Windows only')
     tray = None

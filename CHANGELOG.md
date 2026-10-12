@@ -1,5 +1,15 @@
 # Log Helper changelog
 
+## 0.15.24
+
+- Check changed files every 10 seconds by default and automatically start in
+  the Windows tray. Folder selection is the only setup question; Enter accepts
+  the folder when exactly one installed client is detected.
+- Add explicit `--once` and `--foreground` options; `--watch` still keeps the
+  console open. Dry runs stay one-shot unless a watch mode is selected.
+- Add a 10-second tray interval choice and reject missing addon folders before
+  starting a background worker. Multiple detected clients still require a choice.
+
 ## 0.15.22
 
 - Maximum-health changes alone no longer create or deepen close calls when

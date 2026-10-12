@@ -30,16 +30,17 @@ it does not include the addon or install it for you.
    tracking enabled for the corresponding imports.
 3. Extract the **Windows x64 helper ZIP** somewhere outside
    `Interface/AddOns`. Double-click **DingTracker-LogHelper.exe**.
-   **Python is not required.** Choose the numbered WoW client folder, or paste
+   **Python is not required.** If it finds one installed client, press **Enter**
+   to use that folder. Otherwise choose the numbered WoW client folder, or paste
    its full path, such as
    `C:\Program Files (x86)\World of Warcraft\_classic_beta_`.
    Choose the client folder containing **Interface**, **Logs** and **WTF**,
    with `DingTracker_LogData` installed. It checks common install locations;
    installations elsewhere can be entered manually.
-4. Press **Enter** for checks every **60 seconds**, then **Enter** again for
-   **Background** mode. The helper moves to the Windows tray beside the clock;
+4. The helper automatically starts **10-second checks** in **Background** mode.
+   There are no interval or mode questions. It moves to the Windows tray beside the clock;
    it may be inside the **^** menu. Right-click its icon for **Scan now** or **Exit helper**.
-   Console and one-shot modes are also available.
+   Console and one-shot modes are available through command-line options below.
 5. Play, then type **`/reload` in WoW chat** to save your latest progress.
    Wait for a helper scan, or choose **Scan now** from its tray menu. Type
    **`/reload` in WoW chat again** to load the results. Check `/ding logs status`.
@@ -62,14 +63,14 @@ little later, so a recent encounter can take another scan and reload to appear.
 
 ## Interval and background controls
 
-The default check interval is **60 seconds**. Setup accepts **5–3600 seconds**.
+The default check interval is **10 seconds**. Use `--interval` for **5–3600 seconds**.
 In Background mode, the setup console closes and the helper runs with a
 **Windows notification-area icon**, possibly under the **^** arrow beside the
 clock. Right-click the Ding Tracker icon to:
 
 - **Show console / Hide console** to inspect results and return to the tray.
 - **Scan now** to import immediately after saving your character in WoW.
-- Choose **30, 60, 120 or 300 seconds** between checks, without restarting.
+- Choose **10, 30, 60, 120 or 300 seconds** between checks, without restarting.
 - **Exit helper** to stop it.
 
 Double-click the tray icon to show the console. Closing that console also stops
@@ -80,21 +81,31 @@ Each timer tick checks file sizes and modification times. It parses only when
 files change or you choose Scan now. Unchanged errors are not repeatedly parsed
 or printed. The helper never reloads WoW for you; enter `/reload` in game to
 read the generated import. It does not start automatically with Windows.
-Folder and interval choices are session-only; next launch asks again.
+Folder choices and custom intervals are session-only. The next launch uses the
+defaults unless you provide command-line options. The helper only asks which
+WoW client folder to use; Enter accepts a single detected folder. If several
+clients are installed, choose one explicitly. Use **Q** to exit folder selection.
 
-For a single scan, run this command in PowerShell from the extracted folder:
+To launch with the default 10-second background checks, run:
 
 ```powershell
 .\DingTracker-LogHelper.exe --wow "C:\Program Files (x86)\World of Warcraft\_classic_beta_"
 ```
 
-Add `--watch --interval 120` to check every two minutes in the console, or
+For a single scan, run this command in PowerShell from the extracted folder:
+
+```powershell
+.\DingTracker-LogHelper.exe --wow "C:\Program Files (x86)\World of Warcraft\_classic_beta_" --once
+```
+
+Use `--foreground --interval 120` (or `--watch --interval 120`) to check every two minutes in the console, or
 `--background --interval 300` to use the tray with five-minute checks.
 `--wow "<client folder>" --status` shows the running interval; use the same path
 with `--stop` to stop its background helper. `--dry-run` reports without writing
-import data. `--help` lists options and `--version` shows the helper version.
+import data and scans once unless you also choose a watch mode.
+`--help` lists options and `--version` shows the helper version.
 The ZIP includes a SHA-256 checksum and embedded-runtime license notices.
-The executable is unsigned. A short console setup configures the tray worker;
+The executable is unsigned. A short console folder selection starts the tray worker;
 there is no installer, Windows service or Python prerequisite for users.
 
 ## What gets imported
