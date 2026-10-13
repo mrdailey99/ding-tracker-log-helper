@@ -71,6 +71,83 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(levels[9]['hits'][0]['amount'], 51)
         self.assertTrue(levels[9]['hits'][0]['critical'])
 
+    def volley_points(self, spell=2643, cast=2, amounts=(51, 50, 53)):
+        points = [(BASE + cast, 'cast', GUID, {'id': spell, 'name': 'Multi-Shot'})]
+        points += [(BASE + cast + 1 + index / 10, 'hit', GUID,
+            {'id': spell, 'name': 'Multi-Shot', 'amount': amount, 'critical': index == 2,
+             'event': 'SPELL_DAMAGE', 'target': MOB + str(index)}) for index, amount in enumerate(amounts)]
+        return points
+
+    def settled(self, points):
+        return points + [health(90, 200)]
+
+    def test_multishot_delayed_impacts_keep_independent_hit_and_volley_records(self):
+        levels, report = self.build(self.settled(self.volley_points()))
+        self.assertEqual(report['highestHit'], 53)
+        self.assertEqual(report['highestVolley'], 154)
+        volley = levels[9]['volleys'][0]
+        self.assertEqual((volley['amount'], volley['targets'], volley['criticalHits']), (154, 3, 1))
+        self.assertEqual(volley['castAt'], BASE + 2)
+        self.assertEqual(volley['at'], BASE + 3.2)
+
+    def test_single_target_winner_and_aoe_winner_can_be_different_spells(self):
+        points = self.volley_points() + [(BASE + 5, 'hit', GUID, {'id': 133, 'amount': 200})]
+        levels, report = self.build(self.settled(points))
+        self.assertEqual(levels[9]['hits'][0]['id'], 133)
+        self.assertEqual(levels[9]['volleys'][0]['id'], 2643)
+        self.assertEqual(report['highestVolley'], 154)
+
+    def test_separate_casts_do_not_accumulate_and_same_timestamp_targets_remain_distinct(self):
+        points = self.volley_points() + self.volley_points(cast=12, amounts=(10, 10, 10))
+        levels, _ = self.build(self.settled(points))
+        self.assertEqual(levels[9]['volleys'][0]['amount'], 154)
+        points = self.volley_points()
+        points[2] = (points[1][0], *points[2][1:])
+        points[3] = (points[1][0], *points[3][1:])
+        self.assertEqual(self.build(self.settled(points))[0][9]['volleys'][0]['amount'], 154)
+
+    def test_periodic_damage_pets_unmatched_ids_and_missing_casts_are_not_volleys(self):
+        points = self.volley_points()
+        periodic = (BASE + 3.5, 'hit', GUID, dict(points[1][3], amount=900, event='SPELL_PERIODIC_DAMAGE'))
+        pet = (BASE + 3.6, 'hit', 'Pet-1-ABC', dict(points[2][3], amount=800))
+        self.assertEqual(self.build(self.settled(points + [periodic, pet]))[1]['highestVolley'], 154)
+        self.assertEqual(self.build(self.settled(points[1:]))[1]['highestVolley'], 0)
+        self.assertEqual(self.build(self.settled(self.volley_points(spell=10)))[1]['highestVolley'], 0)
+        only_periodic = [(at, kind, entity, dict(value, event='SPELL_PERIODIC_DAMAGE'))
+            if kind == 'hit' else (at, kind, entity, value) for at, kind, entity, value in points]
+        self.assertEqual(self.build(self.settled(only_periodic))[1]['highestVolley'], 0)
+
+    def test_repeat_target_and_overlapping_casts_are_ambiguous(self):
+        points = self.volley_points()
+        repeat = (BASE + 3.5, 'hit', GUID, dict(points[1][3], amount=75))
+        self.assertEqual(self.build(self.settled(points + [repeat]))[1]['highestVolley'], 0)
+        overlapping = sorted(points + self.volley_points(cast=3), key=lambda p: (p[0], p[1] != 'cast'))
+        self.assertEqual(self.build(self.settled(overlapping))[1]['highestVolley'], 0)
+
+    def test_unsettled_cast_window_and_unknown_targets_are_not_volleys(self):
+        self.assertEqual(self.build(self.volley_points())[1]['highestVolley'], 0)
+        data = context(); data['characters'][GUID]['exportedAt'] = int(BASE + 4)
+        self.assertEqual(self.build(self.settled(self.volley_points()), data=data)[1]['highestVolley'], 0)
+        points = self.volley_points(); points[1][3]['target'] = '0000000000000000'
+        self.assertEqual(self.build(self.settled(points))[1]['highestVolley'], 0)
+
+    def test_volley_cannot_cross_level_or_disabled_interval(self):
+        data = context(); record = data['characters'][GUID]['records'][9]
+        record['endedAt'] = int(BASE + 4)
+        self.assertEqual(self.build(self.settled(self.volley_points()), data=data)[1]['highestVolley'], 0)
+        data = context(); record = data['characters'][GUID]['records'][9]
+        record['coverage']['abilities'] = [
+            {'startedAt': int(BASE - 100), 'endedAt': int(BASE + 4), 'enabled': True},
+            {'startedAt': int(BASE + 4), 'endedAt': int(BASE + 5), 'enabled': False},
+            {'startedAt': int(BASE + 5), 'endedAt': int(BASE + 100), 'enabled': True}]
+        self.assertEqual(self.build(self.settled(self.volley_points()), data=data)[1]['highestVolley'], 0)
+
+    def test_immediate_burst_uses_short_window_and_includes_overkill_amount(self):
+        points = [(BASE + 2, 'cast', GUID, {'id': 1449, 'name': 'Arcane Explosion'})]
+        points += [(BASE + 2.01, 'hit', GUID, {'id': 1449, 'amount': 100, 'event': 'SPELL_DAMAGE', 'target': MOB + str(i)}) for i in range(2)]
+        points += [(BASE + 2.7, 'hit', GUID, {'id': 1449, 'amount': 999, 'event': 'SPELL_DAMAGE', 'target': MOB + '3'})]
+        self.assertEqual(self.build(self.settled(points))[1]['highestVolley'], 200)
+
     def test_wrong_character_and_tracking_off(self):
         data = context()
         data['characters'][GUID]['records'][9]['coverage']['abilities'][0]['enabled'] = False
@@ -284,6 +361,24 @@ class DiskTests(unittest.TestCase):
             header = '10/7/2026 10:01:00.000-5  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.60.1,PROJECT_ID,18\n'
             path.write_text(header + self.line(guid='Player-2-DEF') + self.line(event='SWING_DAMAGE_LANDED'))
             self.assertFalse(any(p[1] == 'hit' for p in logs.read_logs([path], {GUID: {}})[0]))
+
+    def test_actual_damage_is_not_unmitigated_damage_and_aoe_targets_survive_deduplication(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'log.txt'
+            header = '10/7/2026 10:01:00.000-5  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.60.1,PROJECT_ID,18\n'
+            cast = f'10/7/2026 10:01:14.714-5  SPELL_CAST_SUCCESS,{GUID},Player,0x511,0x0,nil,nil,0x0,0x0,2643,Multi-Shot,0x1\n'
+            lines = []
+            for i in range(3):
+                line = self.line().replace('8044,Earth Shock', '2643,Multi-Shot').replace(',51,51,-1,', ',51,74,-1,')
+                lines.append(line.replace(MOB, MOB + str(i)))
+            path.write_text(header + cast + ''.join(lines) * 2)
+            points, _ = logs.read_logs([path, path], {GUID: {}})
+            hits = [p for p in points if p[1] == 'hit']
+            self.assertEqual(len(hits), 3)
+            self.assertEqual([p[3]['amount'] for p in hits], [51, 51, 51])
+            payload, report = logs.build_payload(context(), points + [health(90, 200)], int(BASE + 101))
+            self.assertEqual(report[GUID]['highestVolley'], 153)
+            self.assertEqual(payload['characters'][GUID]['levels'][9]['volleys'][0]['targets'], 3)
 
     def test_only_companion_written_and_dry_run_preserves_files(self):
         with tempfile.TemporaryDirectory() as folder:

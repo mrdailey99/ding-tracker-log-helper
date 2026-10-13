@@ -21,6 +21,15 @@ VERSION = (Path(__file__).with_name('VERSION')).read_text(encoding='utf-8').stri
 METRICS = ("abilities", "mobs", "toughest", "nearDeaths")
 MAX_POINTS = 1_000_000
 DEFAULT_INTERVAL = 10
+# Reviewed direct-impact families. Multi-Shot projectiles in the local 70338
+# logs land separately, up to 1.225 seconds after SPELL_CAST_SUCCESS. Do not
+# group arbitrary damage by time: channels, DoTs and unmatched proc IDs are not
+# a volley. Other listed bursts have a short immediate-impact window.
+VOLLEY_WINDOWS = {2643: 3.0}
+VOLLEY_WINDOWS.update(dict.fromkeys((1449, 8437, 8438, 8439, 10201, 10202,
+    845, 7369, 11608, 11609, 20569, 1680,
+    411128, 779, 780, 769, 9754, 9908, 407778, 407784), .5))
+MAX_VOLLEY_TARGETS = 200
 GAME_SETUP = "In WoW, press Enter to open chat. Type '/ding logs on' and press Enter.\nThen type '/reload' in chat and press Enter to save your character first."
 SPACE = re.compile(r"(?:\s+|--[^\r\n]*)+")
 NAMED = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)\s*=")
@@ -194,13 +203,18 @@ def read_logs(paths, characters):
                     src, dst = fields[1], fields[5]
                     spell = event.startswith(('SPELL_', 'RANGE_', 'DAMAGE_SHIELD'))
                     start = 12 if spell else 9
+                    if event == 'SPELL_CAST_SUCCESS' and src in characters and int(fields[3], 16) & 0x401 == 0x401:
+                        spell_id = integer(fields[9], 10**8)
+                        if spell_id in VOLLEY_WINDOWS and len(fields) >= 12:
+                            points.append((at, 'cast', src, {'id': spell_id, 'name': fields[10]}))
                     if event in ('SPELL_DAMAGE', 'SPELL_PERIODIC_DAMAGE', 'RANGE_DAMAGE', 'DAMAGE_SHIELD', 'SWING_DAMAGE') and src in characters:
                         suffix = fields[:-1] if fields[-1] in ('ST', 'AOE') else fields
                         amount = integer(suffix[-10])
                         spell_id = integer(fields[9], 10**8) if spell else 6603
                         # Require the advanced health block as well as the ten-field damage suffix.
                         if len(suffix) >= start + 27 and amount and spell_id and int(fields[3], 16) & 0x401 == 0x401:
-                            points.append((at, 'hit', src, {'id': spell_id, 'name': fields[10] if spell else 'Attack', 'amount': amount, 'critical': suffix[-3] == 'true'}))
+                            points.append((at, 'hit', src, {'id': spell_id, 'name': fields[10] if spell else 'Attack', 'amount': amount,
+                                'critical': suffix[-3] == 'true', 'event': event, 'target': dst}))
                     if event in ('SPELL_DAMAGE', 'SPELL_PERIODIC_DAMAGE', 'RANGE_DAMAGE', 'DAMAGE_SHIELD', 'SPELL_HEAL', 'SPELL_PERIODIC_HEAL', 'SPELL_CAST_SUCCESS', 'SWING_DAMAGE', 'SWING_DAMAGE_LANDED') and len(fields) >= start + 17:
                         guid = fields[start]
                         hp, maximum = integer(fields[start + 2]), integer(fields[start + 3])
@@ -216,7 +230,7 @@ def read_logs(paths, characters):
                 if len(points) > MAX_POINTS:
                     raise ValueError("Log selection exceeds one million observations; archive older logs first")
     unique = []
-    for point in sorted(points, key=lambda p: (p[0], {'death': 0, 'health': 1, 'hit': 2, 'kill': 3}[p[1]])):
+    for point in sorted(points, key=lambda p: (p[0], {'death': 0, 'cast': 1, 'health': 2, 'hit': 3, 'kill': 4}[p[1]])):
         key = (point[0], point[1], point[2], json.dumps(point[3], sort_keys=True))
         if key not in seen:
             seen.add(key); unique.append(point)
@@ -237,6 +251,71 @@ def record_at(character, at, metric):
     return None
 
 
+def highest_volleys(character, guid, points):
+    """One observed direct impact per target, attached to a matching cast.
+
+    Windows are deliberately bounded and spell-specific; they are not evidence
+    of a shared cast GUID. Wait for the whole window in the log and saved context,
+    and reject overlapping casts, repeat impacts or split tracking/level spans.
+    """
+    pending, best = {}, {}
+    observed_until = max((p[0] for p in points), default=0)
+
+    def finish(group):
+        level = group['level']
+        deadline = group['castAt'] + VOLLEY_WINDOWS[group['id']]
+        if group['invalid'] or len(group['targets']) < 2 or deadline > observed_until or deadline > character['exportedAt']:
+            return
+        record = character['records'][level]
+        # One uninterrupted enabled interval must cover the whole association
+        # window, so a reload, ding or tracking pause cannot splice two volleys.
+        if not any(span.get('enabled') is True and span['startedAt'] + 1 <= group['castAt']
+            and deadline < span['endedAt'] for span in array(record['coverage'].get('abilities'))):
+            return
+        if not record['startedAt'] + 1 <= group['castAt'] < deadline < record['endedAt']:
+            return
+        amount = sum(hit['amount'] for hit in group['targets'].values())
+        if not 0 < amount <= 10**15:
+            return
+        volley = {'id': group['id'], 'name': group['name'], 'amount': amount,
+            'castAt': group['castAt'], 'at': group['lastAt'], 'window': VOLLEY_WINDOWS[group['id']],
+            'targets': len(group['targets']), 'criticalHits': sum(hit.get('critical') is True for hit in group['targets'].values())}
+        previous = best.get(level)
+        if previous is None or (volley['amount'], -volley['id']) > (previous['amount'], -previous['id']):
+            best[level] = volley
+
+    for at, kind, entity, value in points:
+        spell_id = value.get('id')
+        if entity != guid or spell_id not in VOLLEY_WINDOWS:
+            continue
+        previous = pending.get(spell_id)
+        if kind == 'cast':
+            overlap = previous and at < previous['castAt'] + VOLLEY_WINDOWS[spell_id]
+            if previous:
+                previous['invalid'] |= bool(overlap)
+                finish(previous)
+            level = record_at(character, at, 'abilities')
+            if level:
+                pending[spell_id] = {'id': spell_id, 'name': value.get('name'), 'castAt': at,
+                    'lastAt': at, 'level': level, 'targets': {}, 'invalid': bool(overlap)}
+            else:
+                pending.pop(spell_id, None)
+        elif kind == 'hit' and previous and 0 <= at - previous['castAt'] < VOLLEY_WINDOWS[spell_id]:
+            if value.get('event') not in ('SPELL_DAMAGE', 'RANGE_DAMAGE'):
+                continue  # Never include periodic ticks, shields or melee swings.
+            target = value.get('target')
+            if (not isinstance(target, str) or not target.startswith(('Creature-', 'Player-', 'Pet-', 'Vehicle-'))
+                or target in previous['targets'] or len(previous['targets']) >= MAX_VOLLEY_TARGETS
+                or record_at(character, at, 'abilities') != previous['level']):
+                previous['invalid'] = True
+                continue
+            previous['targets'][target] = value
+            previous['lastAt'] = at
+    for group in pending.values():
+        finish(group)
+    return best
+
+
 def build_payload(context, points, now=None):
     if not isinstance(context, dict) or context.get('schema') != SCHEMA:
         raise ValueError("No supported log context. Enable imports in Ding Tracker, then /reload")
@@ -249,7 +328,7 @@ def build_payload(context, points, now=None):
         levels, health, low_count, confirmed = {}, {}, 0, 0
 
         def bucket(level):
-            return levels.setdefault(level, {'hits': [], 'health': [], 'closeCalls': []})
+            return levels.setdefault(level, {'hits': [], 'volleys': [], 'health': [], 'closeCalls': []})
 
         markers = array(character.get('markers'))
         markers.sort(key=lambda m: m['at'])
@@ -363,11 +442,15 @@ def build_payload(context, points, now=None):
             index = bisect_left(cancellations, close['timestamp'])
             return index == len(cancellations) or (cancellations[index] >= close['combatEndedAt'] + 1 and cancellations[index] > close['recoveredAt'])
 
+        for level, volley in highest_volleys(character, guid, points).items():
+            bucket(level)['volleys'] = [volley]
         for items in levels.values():
             items['closeCalls'] = [c for c in items['closeCalls'] if uninterrupted_close(c)]
         confirmed = sum(len(v['closeCalls']) for v in levels.values())
         result['characters'][guid] = {'exportedAt': character.get('exportedAt'), 'levels': levels}
-        report[guid] = {'levels': len(levels), 'highestHit': max((v['hits'][0]['amount'] for v in levels.values() if v['hits']), default=0), 'mobHealthRecords': sum(len(v['health']) for v in levels.values()), 'lowHealthSamples': low_count, 'confirmedCloseCalls': confirmed}
+        report[guid] = {'levels': len(levels), 'highestHit': max((v['hits'][0]['amount'] for v in levels.values() if v['hits']), default=0),
+            'highestVolley': max((v['volleys'][0]['amount'] for v in levels.values() if v['volleys']), default=0),
+            'mobHealthRecords': sum(len(v['health']) for v in levels.values()), 'lowHealthSamples': low_count, 'confirmedCloseCalls': confirmed}
     return result, report
 
 
@@ -540,7 +623,7 @@ def show_report(report, interactive=False):
     else:
         print('\nScan complete.', flush=True)
         for guid, result in report['characters'].items():
-            print(f"  {guid}: highest hit {result['highestHit']}, {result['mobHealthRecords']} mob HP records, {result['confirmedCloseCalls']} close calls.", flush=True)
+            print(f"  {guid}: highest single-target hit {result['highestHit']}, highest AoE volley {result['highestVolley']}, {result['mobHealthRecords']} mob HP records, {result['confirmedCloseCalls']} close calls.", flush=True)
         for warning in report['warnings']:
             print(f'  Warning: {warning}', flush=True)
     if not report['dryRun']:
@@ -656,8 +739,12 @@ def launch_background(args):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if '--journal-transfer' in argv or '--journal' in argv:
+        from journal_transfer import main as journal_main
+        return journal_main([value for value in argv if value not in ('--journal-transfer', '--journal')])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', action='version', version=f'Ding Tracker Log Helper {VERSION}')
+    parser.add_argument('--journal-transfer', '--journal', action='store_true', help='Open the journal file/clipboard transfer window; add --export/--import/--copy/--paste for command-line operations')
     parser.add_argument('--wow', type=Path, help='Client folder containing Interface, Logs and WTF')
     parser.add_argument('--dry-run', action='store_true', help='Report results without changing any files')
     parser.add_argument('--interval', type=interval_seconds, default=DEFAULT_INTERVAL, help=f'Seconds between checks (5-3600; default {DEFAULT_INTERVAL})')

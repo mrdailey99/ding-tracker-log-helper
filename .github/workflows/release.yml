@@ -36,10 +36,11 @@ jobs:
           $dingNotes = [regex]::Matches($dingChangelog, $dingPattern)
           if ($dingNotes.Count -ne 1 -or -not $dingNotes[0].Groups[1].Value.Trim()) { throw 'Add matching release notes to CHANGELOG.md.' }
           New-Item -ItemType Directory -Path .build -Force | Out-Null
-          $dingText = "## Download and setup`n`nDownload the Windows x64 ZIP under Assets and extract it. Python is not required.`n`nInstall Ding Tracker 0.15.21 or newer from CurseForge. In WoW chat, enter /ding logs on and then /reload. Run DingTracker-LogHelper.exe and select the Forever client folder containing Interface, Logs and WTF. Press Enter to use it when only one client is found. Checks start every 10 seconds in background tray mode automatically.`n`nAfter playing, /reload saves your progress; Scan now imports it; a second /reload loads the results. See the [README](https://github.com/mrdailey99/ding-tracker-log-helper#readme) for full instructions.`n`n## Changes`n`n" + $dingNotes[0].Groups[1].Value.Trim()
+          $dingText = "## Download and setup`n`nDownload the Windows x64 ZIP under Assets and extract it. Python is not required.`n`nInstall Ding Tracker 0.15.28 or newer from CurseForge. For journal transfer, open Start-JournalTransfer.cmd, select the Forever client folder containing Interface, Logs and WTF, and follow the on-screen file or clipboard instructions. Combat logging is not required for journal transfer.`n`nFor optional combat-log records, enter /ding logs on in WoW chat and then /reload. Run DingTracker-LogHelper.exe and select the client folder. Press Enter to use it when only one client is found. Checks start every 10 seconds in background tray mode automatically.`n`nAfter playing, /reload saves your progress; Scan now imports it; a second /reload loads the results. See the [README](https://github.com/mrdailey99/ding-tracker-log-helper#readme) for full instructions.`n`n## Changes`n`n" + $dingNotes[0].Groups[1].Value.Trim()
           $dingText | Set-Content -LiteralPath .build/release-notes.md -Encoding UTF8
           "version=$dingVersion" >> $env:GITHUB_OUTPUT
       - run: python -m unittest discover -s tests -p test_log_import.py
+      - run: python -m unittest discover -s tests -p test_journal_transfer.py
       - run: ./build.ps1
         shell: pwsh
       - name: Smoke test portable executable

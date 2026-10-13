@@ -1,5 +1,6 @@
 """Verify a Windows release ZIP on synthetic data, without Python on its PATH."""
 import argparse
+import base64
 import csv
 import hashlib
 import io
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import zlib
 
 
 def check(archive):
@@ -20,7 +22,8 @@ def check(archive):
         bundle = root / 'bundle'
         with zipfile.ZipFile(archive) as zipped:
             expected = {'DingTracker-LogHelper.exe', 'README.md', 'CHANGELOG.md', 'LICENSE-Python.txt',
-                        'LICENSE-PyInstaller.txt', 'LICENSE-DingTracker-LogHelper.txt', 'BUILD-INFO.json', 'SHA256SUMS.txt'}
+                        'LICENSE-PyInstaller.txt', 'LICENSE-DingTracker-LogHelper.txt', 'BUILD-INFO.json', 'SHA256SUMS.txt',
+                        'Start-JournalTransfer.cmd'}
             assert set(zipped.namelist()) == expected, 'Unexpected release files'
             zipped.extractall(bundle)
         exe = bundle / 'DingTracker-LogHelper.exe'
@@ -90,6 +93,25 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
         after = {p.relative_to(client).as_posix(): p.read_bytes() for p in client.rglob('*') if p.is_file()}
         assert set(after) == set(before)
         assert [name for name in before if before[name] != after[name]] == ['Interface/AddOns/DingTracker_LogData/Data.lua']
+        # The frozen helper must keep individual damage and a delayed volley
+        # distinct, even when the unmitigated column contains larger values.
+        cast = f'10/7/2026 10:01:14.714-5  SPELL_CAST_SUCCESS,{guid},Synthetic Player,0x511,0x0,nil,nil,0x0,0x0,2643,Multi-Shot,0x1\n'
+        volley_lines = []
+        for index, amount in enumerate((51, 50, 53)):
+            hit_fields = fields.copy()
+            hit_fields[5] = f'Creature-0-1-2-3-123-00000{index + 1}'
+            hit_fields[9:11] = ['2643', 'Multi-Shot']
+            hit_fields[-11:-9] = [str(amount), '74']
+            output = io.StringIO(); csv.writer(output, lineterminator='\n').writerow(hit_fields)
+            volley_lines.append(f'10/7/2026 10:01:15.{714 + index * 100:03d}-5  ' + output.getvalue())
+        log.write_text('10/7/2026 10:01:00.000-5  COMBAT_LOG_VERSION,22,ADVANCED_LOG_ENABLED,0,BUILD_VERSION,1.60.1,PROJECT_ID,18\n'
+            + cast + ''.join(volley_lines) + '10/7/2026 10:01:20.000-5  ' + line.getvalue(), encoding='utf-8')
+        result = run('--wow', client, '--once')
+        report, _ = json.JSONDecoder().raw_decode(result.stdout)
+        assert report['characters'][guid]['highestHit'] == 53
+        assert report['characters'][guid]['highestVolley'] == 154
+        assert '["targets"]=3' in target.read_text().replace(' ', '')
+        assert saved.read_bytes() == before[saved.relative_to(client).as_posix()]
         assert 'Install the DingTracker_LogData' in run('--wow', root, '--once', code=1).stderr
         assert 'Install the DingTracker_LogData' in run('--wow', root, code=1).stderr
 
@@ -101,6 +123,55 @@ DingTrackerLogContext = { ["schema"] = 1, ["characters"] = {
             if isinstance(value, (int, float)): return str(value)
             if isinstance(value, list): return '{' + ','.join(literal(v) for v in value) + '}'
             return '{' + ','.join('[' + literal(k) + ']=' + literal(v) for k, v in value.items()) + '}'
+
+        # Exercise the new frozen transport CLI on its own synthetic client.
+        # A literal-only LZSS fixture does not depend on the source compressor.
+        def typed(value):
+            if isinstance(value, bool): return b'b1' if value else b'b0'
+            if isinstance(value, (int, float)):
+                raw = str(value).encode('ascii')
+                return b'n' + str(len(raw)).encode() + b':' + raw
+            if isinstance(value, str):
+                raw = value.encode('utf-8').hex().upper().encode('ascii')
+                return b's' + str(len(raw)).encode() + b':' + raw
+            return b't' + str(len(value)).encode() + b':' + b''.join(typed(k) + typed(v) for k, v in value.items())
+
+        journal_client = root / 'Synthetic Journal Client'
+        journal_saved = journal_client / 'WTF/Account/TEST/SavedVariables/DingTracker.lua'
+        journal_saved.parent.mkdir(parents=True)
+        journal_bridge = journal_client / 'Interface/AddOns/DingTracker_LogData'
+        journal_bridge.mkdir(parents=True)
+        journal_target = journal_bridge / 'Journal.lua'
+        journal_target.write_text('DingTrackerJournalPayload={schema=1,text=""}\n')
+        (journal_bridge / 'Data.lua').write_text('combat payload unchanged\n')
+        core = journal_client / 'Interface/AddOns/DingTracker'
+        core.mkdir()
+        (core / 'DingTracker.toc').write_text('## Version: synthetic\n')
+        identity = dict(guid=guid, name='Synthetic Traveller', realm='Synthetic Realm', **{'class': 'HUNTER'})
+        journal_raw = typed(dict(schema=1, version=version, exportedAt=1791384000,
+            character=dict(identity=identity, currentLevel=19, levels={19: dict(level=19, counters=dict(mobs=25), coverage={})})))
+        journal_encoded = base64.b64encode(b''.join(b'\x00' + journal_raw[index:index+8] for index in range(0, len(journal_raw), 8))).decode('ascii')
+        journal_text = f'DINGTRACKER-DATA:2:{zlib.adler32(journal_raw):08X}:{len(journal_raw)}\n{journal_encoded}'
+        journal_saved.write_text('DingTrackerDB=' + literal(dict(journalTransfer=dict(fileExport=dict(
+            text=journal_text, identity=identity, mode='file', exportedAt=1791384000)), sentinel='unchanged')), encoding='utf-8')
+        journal_before = {p.relative_to(journal_client).as_posix(): p.read_bytes() for p in journal_client.rglob('*') if p.is_file()}
+        ui_check = run('--journal-transfer', '--wow', journal_client, '--check-ui')
+        assert 'four actions' in ui_check.stdout and 'Tcl/Tk resources verified' in ui_check.stdout
+        assert journal_before == {p.relative_to(journal_client).as_posix(): p.read_bytes() for p in journal_client.rglob('*') if p.is_file()}
+        export = root / 'Synthetic Transfer.dingjournal'
+        run('--journal-transfer', '--wow', journal_client, '--export', export)
+        assert export.read_text() == journal_text
+        assert 'verified' in run('--journal-transfer', '--validate', export).stdout
+        run('--journal-transfer', '--wow', journal_client, '--import', export)
+        assert 'DingTrackerJournalPayload' in journal_target.read_text() and journal_encoded in journal_target.read_text()
+        journal_after = {p.relative_to(journal_client).as_posix(): p.read_bytes() for p in journal_client.rglob('*') if p.is_file()}
+        assert set(journal_before) == set(journal_after)
+        assert [name for name in journal_before if journal_before[name] != journal_after[name]] == ['Interface/AddOns/DingTracker_LogData/Journal.lua']
+        staged = journal_target.read_bytes()
+        corrupt = root / 'Corrupt Transfer.dingjournal'
+        corrupt.write_text(journal_text[:-4])
+        run('--journal-transfer', '--wow', journal_client, '--import', corrupt, code=1)
+        assert journal_target.read_bytes() == staged
 
         def close_case(name, samples, expected):
             # Exercise the frozen parser through its real CLI and disk format.

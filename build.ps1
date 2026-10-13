@@ -40,6 +40,7 @@ $dingVersionInfo.Replace('{NUMBERS}', $dingNumbers).Replace('{VERSION}', $dingVe
 & $dingPython -m PyInstaller --noconfirm --onefile --console --noupx --name DingTracker-LogHelper `
     --distpath $dingStage --workpath (Join-Path $BuildDirectory 'work') --specpath $BuildDirectory `
     --add-data ((Join-Path $PSScriptRoot 'VERSION') + ';.') --version-file $dingVersionFile `
+    --hidden-import journal_transfer --hidden-import tkinter --hidden-import tkinter.ttk --hidden-import tkinter.filedialog --hidden-import tkinter.messagebox `
     (Join-Path $PSScriptRoot 'log_import.py')
 if ($LASTEXITCODE -ne 0) { throw 'Executable build failed.' }
 
@@ -48,6 +49,7 @@ New-Item -ItemType Directory -Path $dingBundle -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $dingStage 'DingTracker-LogHelper.exe') -Destination $dingBundle
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $dingBundle
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'CHANGELOG.md') -Destination $dingBundle
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Start-JournalTransfer.cmd') -Destination $dingBundle
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $dingBundle 'LICENSE-DingTracker-LogHelper.txt')
 # Include the licenses for the embedded Python runtime and PyInstaller bootloader.
 $dingLicenseScript = @'

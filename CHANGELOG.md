@@ -1,5 +1,27 @@
 # Log Helper changelog
 
+## 0.15.28
+
+- Added highest observed AoE volley totals separately from individual hits.
+  Matches supported direct-impact spell IDs to the player's cast event and
+  distinct targets. Periodic ticks, overlapping casts, repeated target impacts,
+  partial windows and level/tracking boundaries cannot create a volley record.
+  Single-hit parsing still uses actual damage, including overkill, rather than
+  the adjacent unmitigated amount.
+- An open Journal Transfer window automatically copies new in-game Copy via
+  helper requests after WoW saves them. Existing requests require the manual
+  copy button; refreshes never repeat a clipboard operation.
+- Saved exports display snapshot size and time. Refresh reads changed saved
+  files and keeps their exact text; it does not create a new snapshot.
+
+- Added a clickable journal transfer window with file export/import and OS
+  clipboard copy/paste. Open Start-JournalTransfer.cmd from the Windows ZIP.
+- Reads compressed or legacy exports, validates bounds and checksums, and stages
+  only DingTracker_LogData/Journal.lua for explicit in-game preview and merge.
+  SavedVariables, backups and combat-log output are preserved.
+- Linux source transfers support file operations without Tk; the clickable
+  window requires Python3 and Tk. Clipboard CLI operations use wl-clipboard/xclip.
+
 ## 0.15.25
 
 - Use Mobs consistently in the HP summary and setup guide, matching the addon.

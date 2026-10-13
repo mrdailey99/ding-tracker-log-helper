@@ -19,6 +19,53 @@ it does not include the addon or install it for you.
 
 ## Set up
 
+### Journal files and clipboard (0.15.28 or newer)
+
+Journal transfers work independently of combat logging. Install addon **0.15.28
+or newer on both computers** and this updated helper. Extract the Windows ZIP,
+then double-click **Start-JournalTransfer.cmd** to open its window; Python and
+typed commands are not required on Windows. Select the WoW client folder
+containing **Interface** and **WTF**.
+
+1. In WoW, open **Ding Tracker > Settings > Data > Export journal > Export to file**.
+   The addon reloads to save the export request. The helper reads it without changing SavedVariables.
+2. In the transfer window, click **Refresh saved exports**, select your character,
+   then **Export to file** or **Copy export to clipboard**. Move the file or text
+   to your other computer.
+3. In the helper on that computer, choose **Import from file** or **Import from clipboard**.
+   This stages `Interface/AddOns/DingTracker_LogData/Journal.lua` only.
+4. In WoW, use **Settings > Data > Import journal > Reload staged file**, then
+   **Import from file** or **Paste via helper** to read it. Check the preview and
+   choose **Import + reload** to combine records and retain a recovery backup.
+   Fully restart WoW if a reload does not refresh the staged file.
+
+WoW has restricted clipboard copying and no documented clipboard-reading or
+arbitrary file-access API. The addon tries native copy where permitted; desktop
+buttons perform actual OS clipboard/file operations. Large exports are compressed,
+and the in-game field shows a bounded preview rather than the entire text.
+
+For clipboard export, keep this window open first. In WoW, **Copy to clipboard**
+tries a full native copy. If blocked, it becomes **Copy via helper** without
+reloading. Click **Copy via helper** to save that snapshot and reload; the open
+window copies the new request automatically and reports its character count.
+If you open the window after saving the request, click **Copy export to clipboard**
+here. Refreshing never copies the same request twice. The selected export shows
+its snapshot size and time; refreshing does not update that snapshot's contents.
+
+Source users can run `python3 journal_transfer.py` or **Start-JournalTransfer.sh**
+on Linux. The window needs Python3 with Tk; file CLI operations need only Python3:
+
+```sh
+python3 journal_transfer.py --wow '/path/to/client' --export '/path/to/journal.dingjournal'
+python3 journal_transfer.py --wow '/path/to/client' --import '/path/to/journal.dingjournal'
+```
+
+Use `--copy` / `--paste` for clipboard CLI operations (Linux requires
+`wl-clipboard` or `xclip`). Keep the transfer window open until pasting on Linux.
+There is no packaged Linux binary yet; native Steam Deck behavior is pending testing.
+
+### Combat logs
+
 1. Install Ding Tracker **0.15.21** or newer, including
    `DingTracker_LogData`. **Fully restart WoW** after adding this new folder.
 2. **In WoW, press Enter to open chat, type `/ding logs on`, and press Enter.**
@@ -112,11 +159,34 @@ there is no installer, Windows service or Python prerequisite for users.
 
 | Record | Rules |
 | --- | --- |
-| Highest hit | Largest individual damage event from your exact player GUID, including overkill. Absorbed damage is not added. Pet hits and aggregate damage totals are excluded. |
+| Highest single-target hit | Largest individual damage event on one target from your exact player GUID, including overkill. AoE targets are separate hits. Absorbed damage is not added. Pet hits and aggregate damage totals are excluded. |
+| Highest AoE volley | Sum of observed direct impacts on at least two distinct targets, matched to one supported player cast. Includes overkill; periodic ticks, pets, ambiguous overlapping casts and split level/tracking intervals are excluded. |
 | Mob HP | An observed maximum HP sample for the exact mob GUID, followed within 120 seconds by your logged `PARTY_KILL`. The same NPC must already have a credited journal kill in that level. No kills are added. |
 | Close call | Reach **10% HP or less in combat**, survive the end of combat and recover to **35% HP or more**, in the same level/session with tracking enabled. Deaths, duels and missing combat/duel proof cancel the episode. Recovery may occur during combat or afterwards. |
 
-Highest hits and mob HP can backfill logged encounters within saved level
+### Single hits and AoE volleys
+
+For a Multi-Shot that hits for **51, 50 and 53**, the single-target record is
+**53** and its volley total is **154 across three targets**. These maxima are
+independent: another ability can hold the single-target record. Neither import
+adds damage to the native total-damage breakdown.
+
+Use updated **0.15.28 addon and helper candidates** for volley records. The
+reviewed burst IDs cover Multi-Shot, Arcane Explosion, Cleave, Whirlwind, Druid
+Swipe and Divine Storm. A damage event must match the exact logged cast spell ID;
+unknown rank/trigger IDs are not guessed. Multi-Shot allows a three-second
+projectile window; the immediate bursts use half a second. The entire window
+must be present in the log and saved enabled interval before it can be imported.
+Repeated impacts on one target or overlapping casts make a candidate ambiguous
+and exclude it. This is an observed volley, not a full channel/DoT total or a
+guarantee that every target was logged. Missing evidence produces no record.
+
+Save the tracking context with `/reload`, use **Scan now**, then `/reload` to
+read the new records. Existing logs can supply volleys where their cast and
+damage events fall within retained tracking intervals. Older helpers still
+supply single hits, HP and close calls but have no volley records.
+
+Highest hits, AoE volleys and mob HP can backfill logged encounters within saved level
 and tracking intervals. Old logs without the new combat/duel markers cannot
 confirm close calls; the helper reports low-health samples as diagnostic
 candidates only.
