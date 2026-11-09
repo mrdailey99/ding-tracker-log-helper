@@ -55,6 +55,26 @@ class LiteralTests(unittest.TestCase):
         data['characters'][GUID]['markers'][0]['proof'] = 'yes'
         with self.assertRaises(ValueError): logs.build_payload(data, [])
 
+    def test_integral_lua_level_key_33_point_zero(self):
+        data = context([marker(0, level=33)])
+        data['characters'][GUID]['records'][33] = data['characters'][GUID]['records'].pop(9)
+        source = 'DingTrackerLogContext=' + logs.lua_literal(data)
+        self.assertIn('[33]=', source)
+        source = source.replace('[33]=', '[33.0]=')
+        parsed = logs.LiteralReader(source).context()
+        logs.validate_context(parsed)
+        self.assertEqual(logs.record_at(parsed['characters'][GUID], BASE + 2, 'abilities'), 33)
+        self.assertIsNone(logs.integer(33.5, 1000))
+
+    def test_legacy_invalid_level_does_not_block_level_33(self):
+        data = context([marker(0, level=33)])
+        records = data['characters'][GUID]['records']
+        records[33] = records.pop(9)
+        records[0] = {'startedAt': int(BASE), 'endedAt': int(BASE + 1), 'coverage': {}}
+        self.assertEqual(logs.discard_invalid_level_records(data), 1)
+        logs.validate_context(data)
+        self.assertEqual(logs.record_at(data['characters'][GUID], BASE + 2, 'abilities'), 33)
+
     def test_timezone_not_machine_timezone(self):
         self.assertEqual(logs.timestamp('10/7/2026 10:01:00.000-5'), logs.timestamp('10/7/2026 15:01:00.000+0'))
         self.assertEqual(logs.timestamp('10/7/2026 10:01:00.000-05:30'), logs.timestamp('10/7/2026 15:31:00.000+0'))

@@ -1,5 +1,12 @@
 # Log Helper changelog
 
+## 0.15.29
+
+- Accept integral SavedVariables level keys such as `33.0`, which Lua can
+  serialize for a valid level 33. Skip invalid legacy level records with a
+  warning so they do not block other valid levels. Fractional levels remain
+  invalid; the helper still does not change SavedVariables.
+
 ## 0.15.28
 
 - Added highest observed AoE volley totals separately from individual hits.

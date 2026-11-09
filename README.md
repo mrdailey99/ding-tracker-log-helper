@@ -105,6 +105,10 @@ little later, so a recent encounter can take another scan and reload to appear.
 - After adding `DingTracker_LogData`, fully restart WoW once so it detects the folder.
 - Save with `/reload`, choose **Scan now**, then `/reload` again. Check the helper
   console for unsupported-log or missing-folder messages.
+- If an older helper reports `Invalid level` after moving a journal between
+  computers, use helper **0.15.29 or newer** and scan again. It keeps valid
+  levels when a legacy saved context contains an invalid level record. The
+  helper reads combat logs from the selected computer's client folder.
 - Close calls need newly recorded combat/duel markers. Older logs can contain
   readable hits and HP without enough evidence to confirm a survived close call.
 

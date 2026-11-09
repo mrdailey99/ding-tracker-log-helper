@@ -169,6 +169,12 @@ def timestamp(text):
 def integer(value, maximum=10**15):
     if isinstance(value, bool):
         return None
+    # Lua stores numeric table keys as numbers. Some SavedVariables writers
+    # render an integral key as 33.0, which is still the same level as 33.
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = int(value)
     try:
         number = int(value)
         return number if str(number) == str(value) and 0 <= number <= maximum else None
@@ -515,6 +521,22 @@ def validate_context(context):
                 raise ValueError("Incomplete tracking marker")
 
 
+def discard_invalid_level_records(context):
+    """Keep valid levels when an older export contains an invalid level key."""
+    removed = 0
+    for character in context.get('characters', {}).values():
+        if not isinstance(character, dict):
+            continue
+        records = character.get('records')
+        if not isinstance(records, dict):
+            continue
+        for level, record in list(records.items()):
+            if integer(level, 1000) in (None, 0) or not isinstance(record, dict):
+                del records[level]
+                removed += 1
+    return removed
+
+
 def run_once(wow, dry_run=False):
     wow = wow.resolve(strict=True)
     target = wow / 'Interface' / 'AddOns' / 'DingTracker_LogData' / 'Data.lua'
@@ -527,6 +549,9 @@ def run_once(wow, dry_run=False):
                 raise ValueError("SavedVariables exceeds 64 MB reader limit")
             context = LiteralReader(saved.read_text(encoding='utf-8-sig')).context()
             if isinstance(context, dict) and context.get('schema') == SCHEMA:
+                removed = discard_invalid_level_records(context)
+                if removed:
+                    errors.append(f'{saved.parent.parent.name}: skipped {removed} invalid legacy level record(s)')
                 validate_context(context)
                 for guid, character in context.get('characters', {}).items():
                     old = contexts['characters'].get(guid)
